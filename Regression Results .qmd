@@ -1,0 +1,305 @@
+---
+title: "Regression Results"
+format: html
+editor: visual
+---
+
+```{r}
+library("tidyverse")
+library("lubridate")
+library("readxl")
+```
+
+```{r}
+# Uploading NOx regression results into R
+nox_east <- read.csv("coefs/east_nox_coef.csv") %>%
+  rename(hour=rows, coef.m1.=V1) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m1.=mean(coef.m1.)) %>%
+  mutate(int="east")
+
+nox_ercot <- read.csv("coefs/ercot_nox_coef.csv") %>%
+  rename(hour=rows, coef.m1.=V1) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m1.=mean(coef.m1.)) %>%
+  mutate(int="ercot")
+
+nox_wecc <- read.csv("coefs/wecc_nox_coef.csv") %>%
+  rename(hour=rows, coef.m1.=V1) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m1.=mean(coef.m1.)) %>%
+  mutate(int="wecc")
+
+attributes <- read.csv("2020_plant_static_attributes.csv")
+plant_2020_excel <- read_excel("2___Plant_Y2020.xlsx")
+
+# combine the NOx regression results
+nox_df <- rbind(nox_east, nox_ercot, nox_wecc) 
+```
+
+```{r}
+# Uploading SO2 regression results into R
+so2_east <- read.csv("coefs/east_so2_coef.csv") %>%
+  rename(hour=rows, coef.m2.=V1)%>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m2.=mean(coef.m2.)) %>%
+  mutate(int="east")
+  
+so2_ercot <- read.csv("coefs/ercot_so2_coef.csv") %>%
+  rename(hour=rows, coef.m2.=V1) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m2.=mean(coef.m2.)) %>%
+  mutate(int="ercot")
+
+so2_wecc <- read.csv("coefs/wecc_so2_coef.csv") %>%
+  rename(hour=rows, coef.m2.=V1) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(coef.m2.=mean(coef.m2.)) %>%
+  mutate(int="wecc")
+
+# combine the SO2 regression results
+so2_df <- rbind(so2_east, so2_ercot, so2_wecc)
+```
+
+Create a balanced panel data, find average nox and so2 coefficients
+
+```{r}
+temp <- left_join(nox_df, so2_df,by=c("plant_id_eia", "hour", "int"), 
+                  relationship="one-to-one") %>%
+  group_by(plant_id_eia, int, hour) %>%
+  tally()
+
+plant_list<-unique(temp$plant_id_eia)
+hour_list<-unique(temp$hour)
+
+panel<-crossing(plant_list,hour_list)
+names(panel)<-c("plant_id_eia", "hour")
+
+nox<-nox_df %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(nox_coef=mean(coef.m1.))
+
+so2<-so2_df %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(so2_coef=mean(coef.m2.))
+
+p2<-left_join(panel, nox, by=c("plant_id_eia", "hour"), relationship="one-to-one")
+
+p3<-left_join(p2, so2, by=c("plant_id_eia", "hour"), relationship="one-to-one")
+
+#coefficients in lbs/Kw
+combined_nox_so2<-p3 %>%
+  mutate(nox_coef=ifelse(is.na(nox_coef), 0, nox_coef)) %>%
+  mutate(so2_coef=ifelse(is.na(so2_coef), 0, so2_coef)) %>%
+  group_by(plant_id_eia, hour) %>%
+  summarize(nox_coef=mean(nox_coef), so2_coef=mean(so2_coef))
+```
+
+Work with Tall1 data
+
+```{r}
+
+#install.packages("haven")
+library("haven")
+
+# Working with Tall1 data
+tall1 <- read_dta("Tall1_List_AP2_V_2011.dta") 
+
+# Renaming column to plant_id_eia
+t1<-tall1 %>%
+  rename(plant_id_eia=orispl) %>%
+  filter(!is.na(plant_id_eia)) %>%
+  group_by(plant_id_eia) %>%
+  mutate(units=n()) %>% #how many time this plant appears in t1
+  select(row, plant_id_eia, units)
+
+# Merging tall1_updated and combined_nox_so2 based on shared plant_id_eia 
+t1_df <- merge(t1, combined_nox_so2, by="plant_id_eia")
+```
+
+Work with Tall2 data
+
+```{r}
+tall2 <- read_dta("Tall2_List_AP2_V_2011_Update.dta") 
+
+t2<-tall2 %>%
+  rename(plant_id_eia=orispl_code)%>%
+  filter(!is.na(plant_id_eia)) %>%
+  group_by(plant_id_eia) %>%
+  mutate(units=n()) %>%
+  mutate(row=as.numeric(Row)) %>%
+  select(row, plant_id_eia, units)
+
+t2_df <- merge(t2, combined_nox_so2, by="plant_id_eia")
+```
+
+Check overlap between T1 and T2, and check overlap between Sigularity and APX
+
+```{r}
+int<-intersect(unique(t2_df$plant_id_eia), unique(t1_df$plant_id_eia))
+
+plants<-rbind(t1_df, t2_df) %>%
+  group_by(plant_id_eia) %>%
+  mutate(units2=n()/24)
+
+plant_merge<-unique(plants$plant_id_eia)
+plant_apx<-unique(t1_df$plant_id_eia)+unique(t2_df$plant_id_eia)-length(int)
+#there is a ~95% match between sigularity and apx
+```
+
+Combine T1 with APX Output
+
+```{r}
+md_T <- read.csv("output-md_T_2014.csv", header = FALSE)
+
+# Changing md_T row names 
+colnames(md_T) <- c('NH3_md_T','NOx_md_T','PM2.5_md_T', 'SO2_md_T', 'VOC_md_T')
+
+# Adding additional column named "row" and populating with 565 values
+row = c(1:565)
+md_T$row = row
+
+# Merging md_T and powerplant_df by row 
+combined_md_T_powerplant_df <- left_join(md_T, t1_df, by = "row",
+                                         relationship="one-to-many") %>%
+  # Dividing columns by 2000 to convert $/tons to $/lbs 
+  mutate(NH3_lbs_md_T = NH3_md_T/2000) %>%
+  mutate(NOx_lbs_md_T = NOx_md_T/2000) %>%
+  mutate(PM2.5_lbs_md_T = PM2.5_md_T/2000) %>%
+  mutate(SO2_lbs_md_T = SO2_md_T/2000) %>%
+  mutate(VOC_lbs_md_T = VOC_md_T/2000) 
+
+# Calculating cost of damages in $/kWh
+damages_t1 <- combined_md_T_powerplant_df %>%
+  mutate(dollar_kWh_nox = nox_coef*NOx_lbs_md_T) %>%
+  mutate(dollar_kWh_so2 = so2_coef*SO2_lbs_md_T)
+```
+
+Combine T2 with APX Output
+
+```{r}
+md_T <- read.csv("output-md_T2_2014.csv", header = FALSE)
+
+# Changing md_T row names 
+colnames(md_T) <- c('NH3_md_T','NOx_md_T','PM2.5_md_T', 'SO2_md_T', 'VOC_md_T')
+
+# Adding additional column named "row" and populating with 565 values
+row = c(1:91)
+md_T$row = row
+
+# Merging md_T and powerplant_df by row 
+combined_md_T_powerplant_df <- left_join(md_T, t2_df, by = "row",
+                                         relationship="one-to-many") %>%
+  # Dividing columns by 2000 to convert $/tons to $/lbs 
+  mutate(NH3_lbs_md_T = NH3_md_T/2000) %>%
+  mutate(NOx_lbs_md_T = NOx_md_T/2000) %>%
+  mutate(PM2.5_lbs_md_T = PM2.5_md_T/2000) %>%
+  mutate(SO2_lbs_md_T = SO2_md_T/2000) %>%
+  mutate(VOC_lbs_md_T = VOC_md_T/2000) 
+
+# Calculating cost of damages in $/kWh
+damages_t2 <- combined_md_T_powerplant_df %>%
+  mutate(dollar_kWh_nox = nox_coef*NOx_lbs_md_T) %>%
+  mutate(dollar_kWh_so2 = so2_coef*SO2_lbs_md_T)
+```
+
+Sort plants by NERC Region (to cross-check with spreadsheet)
+
+```{r}
+
+# Selecting the plant_id_eia and NERC columns 
+plant_2020_excel_NERC <- plant_2020_excel %>%
+  select(...3, ...12) %>%
+  rename(plant_id_eia=...3) %>%
+  mutate(plant_id_eia=as.numeric(plant_id_eia)) %>%
+  filter(!is.na(plant_id_eia)) %>%
+  rename(NERC=...12)
+
+# Merging NERC with $ damage for NOx and SO2
+damages<-rbind(damages_t1, damages_t2)
+
+merged_NERC_damages <- merge(plant_2020_excel_NERC, damages, 
+                             by = "plant_id_eia", all.y=TRUE) %>%
+  mutate(interconnection=ifelse(NERC=="WECC", "West", "East")) %>%
+  mutate(interconnection=ifelse(NERC=="TRE", "Texas", interconnection))
+
+#temp_merge<-unique(merged_NERC_damages$plant_id_eia)
+#all plants found an interconnection
+
+# Summing the $ damages based on 2014 dollars
+damages_NERC_nox_so2 <- merged_NERC_damages %>%
+  #mutate(dollar_kWh_nox=dollar_kWh_nox/units, dollar_kWh_so2=dollar_kWh_so2/units) %>%
+  mutate(dollar_kWh_nox=dollar_kWh_nox/units, dollar_kWh_so2=dollar_kWh_so2/units) %>%
+  group_by(interconnection, hour) %>%
+  summarize(dollar_kWh_nox = sum(dollar_kWh_nox), #total for each interconnection
+            dollar_kWh_so2 = sum(dollar_kWh_so2)) 
+
+damages_allhours<-damages_NERC_nox_so2 %>%
+  group_by(interconnection) %>%
+  summarize(MD_kWh_nox_AP3 = mean(dollar_kWh_nox), #average across all hours
+            MD_kWh_so2_AP3 = mean(dollar_kWh_so2))
+```
+
+Compare results with Holland, Mansur, Muller, and Yates
+
+```{r}
+#try to understand which state is connected with nerc
+state_nerc <- plant_2020_excel %>%
+  select(...3, ...12, ...7) %>%
+  rename(plant_id_eia=...3) %>%
+  mutate(plant_id_eia=as.numeric(plant_id_eia)) %>%
+  filter(!is.na(plant_id_eia)) %>%
+  rename(NERC=...12, State=...7) %>%
+  group_by(NERC, State) %>%
+  tally()
+#TRE=ERCOT
+#MRO=MISO+SPP
+#SERC=SERC+FRCC
+#WECC=WECC+CA
+
+library("readxl")
+excel_sheets("Marginal Damages (2011) from Holland, Mansur, Muller, Yates AER forthcoming.xlsx")
+
+hmmy_NOx<-read_excel("Marginal Damages (2011) from Holland, Mansur, Muller, Yates AER forthcoming.xlsx", sheet="NOX Hourly") %>%
+  mutate(NOX_MD_KWH_West=(NOX_MD_KWH_WECC+NOX_MD_KWH_CA)/2) %>%
+  mutate(NOX_MD_KWH_East=(NOX_MD_KWH_MISO+NOX_MD_KWH_SPP+NOX_MD_KWH_SERC+NOX_MD_KWH_FRCC)/4) %>%
+  mutate(NOX_MD_KWH_Texas=NOX_MD_KWH_ERCOT) %>%
+  select(NOX_MD_KWH_West, NOX_MD_KWH_East, NOX_MD_KWH_Texas, HOUR) %>%
+  filter(!is.na(HOUR)) %>%
+  pivot_longer(cols=starts_with("NOX_MD_KWH_"), names_to="interconnection", 
+               values_to="NOx_hmmy") %>%
+  mutate(interconnection=str_remove(interconnection, "NOX_MD_KWH_")) %>%
+  group_by(interconnection) %>%
+  summarize(MD_NOx_hmmy=mean(NOx_hmmy)*1.37) #convert to 2014 dollars
+
+hmmy_SO2<-read_excel("Marginal Damages (2011) from Holland, Mansur, Muller, Yates AER forthcoming.xlsx", sheet="SO2 Hourly") %>%
+  mutate(SO2_MD_KWH_West=(SO2_MD_KWH_WECC+SO2_MD_KWH_CA)/2) %>%
+  mutate(SO2_MD_KWH_East=(SO2_MD_KWH_MISO+SO2_MD_KWH_SPP+SO2_MD_KWH_SERC+SO2_MD_KWH_FRCC)/4) %>%
+  rename(SO2_MD_KWH_Texas=SO2_MD_KWH_ERCOT) %>%
+  select(SO2_MD_KWH_West, SO2_MD_KWH_East, SO2_MD_KWH_Texas, HOUR) %>%
+  filter(!is.na(HOUR)) %>%
+  pivot_longer(cols=starts_with("SO2_MD_KWH_"), names_to="interconnection", 
+               values_to="SO2_hmmy") %>%
+  mutate(interconnection=str_remove(interconnection, "SO2_MD_KWH_")) %>%
+  group_by(interconnection) %>%
+  summarize(MD_SO2_hmmy=mean(SO2_hmmy)*1.37) #convert to 2014 dollars
+
+hmmy<-merge(hmmy_SO2, hmmy_NOx, by="interconnection")
+
+compare<-merge(damages_allhours, hmmy, by="interconnection") %>%
+  mutate(change_nox=(MD_kWh_nox_AP3-MD_NOx_hmmy)/MD_NOx_hmmy) %>%
+  mutate(change_so2=(MD_kWh_so2_AP3-MD_NOx_hmmy)/MD_SO2_hmmy) 
+```
+
+Calculate damage per mile, taking into account only NOx and SO2
+
+```{r}
+#tesla model s
+#damages per mile are in 2014 cents per mile
+d<-damages_allhours %>%
+  mutate(MD_mi_nox=MD_kWh_nox_AP3*0.31*100, 
+         MD_mi_so2=MD_kWh_so2_AP3*100) %>%
+  mutate(total_md_mi=MD_mi_nox+MD_mi_so2)
+
+write.csv(d, "ev_md_mi.csv", row.names = F)
+```
