@@ -1,0 +1,135 @@
+---
+title: "Damage per mile"
+format: html
+editor: visual
+---
+
+Calculate damage per mile of gasoline vehicles with data from GREET PTW
+
+```{r}
+
+greet<-read.csv("GREET_WTW_Calculator_2022 - GREET_WTW_Calculator_2022.csv")
+NOx_g_mi<- 0.082
+PM25_g_mi<-0.007
+SO2_g_mi<-0.002
+
+a<-read.csv("output-md_A_2014.csv", header=FALSE) #dollars per ton
+names(a)<-c("NH3", "NOx", "PM25", "SO2", "VOC")
+
+#convert to $cents per mi = $/tons x g/mi x 100 cents/dollar x 1 ton/907200 g
+a2<-a %>%
+  mutate(NOx_cents_mi=NOx*NOx_g_mi*100/907200) %>% 
+  mutate(SO2_cents_mi=SO2*SO2_g_mi*100/907200) %>%
+  mutate(total_cents_mi=NOx_cents_mi+SO2_cents_mi)
+
+mean(a2$total_cents_mi)
+```
+
+Calculate damage per mile of gasoline vehicles with 2020 GREET Report Numbers
+
+```{r}
+#https://greet.es.anl.gov/files/vehicles-13
+
+NOx_g_mi<- 0.1198
+PM25_g_mi<-0.0070+0.0055+0.0015+0.00002+0.0046
+SO2_g_mi<-0.0042
+VOC_g_mi<-0.1065+0.0593
+
+a2<-a %>%
+  mutate(NOx_cents_mi=NOx*0.082*100/907200) %>% 
+  mutate(SO2_cents_mi=SO2*0.002*100/907200) %>%
+  mutate(PM25_g_mi=PM25*PM25_g_mi*100/907200) %>%
+  mutate(VOC_g_mi=VOC*VOC_g_mi*100/907200) %>%
+  mutate(total_cents_mi=NOx_cents_mi+SO2_cents_mi) %>%
+  mutate(total4=NOx_cents_mi+SO2_cents_mi+VOC_g_mi+PM25_g_mi) 
+
+summary(a2$total_cents_mi)
+
+summary(a2$total4)
+```
+
+Match county to interconnection to compare with electric vehicles
+
+Match each county with a NERC code
+
+```{r}
+#clean power plant-county name-nerc data
+library("readxl")
+plant_2020_excel <- read_excel("2___Plant_Y2020.xlsx") %>%
+  rename(plant_id_eia=...3, state=...7, county=...9, NERC=...12) %>%
+  mutate(plant_id_eia=as.numeric(plant_id_eia)) %>%
+  filter(!is.na(plant_id_eia)) %>%
+  filter(!is.na(NERC)) %>%
+  group_by(state, county, NERC) %>%
+  tally() 
+ 
+#make unique list of counties
+sc<-plant_2020_excel %>%
+  group_by(state, county) %>%
+  summarize(maxn=max(n))
+
+p<-left_join(sc, plant_2020_excel, by=c("county", "state"), multiple="first") %>%
+  filter(!is.na(county)) %>%
+  select(state, county, NERC)
+
+#find most common nerc for each state
+sn<-p %>%
+  group_by(state, NERC) %>%
+  tally() %>%
+  group_by(state) %>%
+  mutate(maxn=max(n)) %>%
+  filter(maxn==n) %>%
+  select(state, NERC)
+  
+#list of fips in the ap2 model
+library("haven")
+fips<-read_dta("AP2_Fips_List.dta")[1:3109,] 
+row<-c(1:3109)
+f<-cbind(fips,row)
+
+#list fips-countyname from cdc
+library("data.table")
+cdc<-fread("Bridged-Race Population Estimates 1990-2020.txt") %>%
+  mutate(fips=as.numeric(`County Code`)) %>%
+  filter(!is.na(fips)) %>%
+  separate_wider_delim(County, delim=",", names = c("county", "state")) %>%
+  mutate(county=str_remove(county, " County")) %>%
+  mutate(state=str_remove(state, " ")) %>%
+  select(county, state, fips) %>%
+  distinct(county, state, fips)
+
+#merge ap2 fips list with county names
+fc<-merge(f, cdc, by="fips", all.x=TRUE)
+
+#merge fips list with nerc data
+fc_nerc<-merge(fc, p, by=c("county", "state"), all.x=TRUE) %>%
+  arrange(state, county)
+
+fc_nerc2<-merge(fc_nerc, sn, by="state", all.x=TRUE) %>%
+  mutate(NERC=ifelse(is.na(NERC.x), NERC.y, NERC.x)) %>%
+  arrange(row) %>%
+  select(row, state, county, fips, NERC) %>%
+  mutate(interconnection=ifelse(NERC=="WECC", "West", "East")) %>%
+  mutate(interconnection=ifelse(NERC=="TRE", "Texas", interconnection))
+```
+
+Add cents per mile data
+
+```{r}
+d<-cbind(fc_nerc2, a2$total_cents_mi) %>%
+  rename(gv_cents_mi=`a2$total_cents_mi`)
+
+ev<-read.csv("ev_md_mi.csv") %>%
+  rename(ev_cents_mi=total_md_mi) %>%
+  select(interconnection, ev_cents_mi)
+
+d2<-merge(d, ev, by="interconnection", all.x = TRUE) %>%
+  mutate(ev_benefit=gv_cents_mi-ev_cents_mi)
+
+d_summary<-d2 %>%
+  group_by(NERC) %>%
+  summarize(gv_cents_mi=mean(gv_cents_mi), ev_cents_mi=mean(ev_cents_mi), 
+            ev_benefit=mean(ev_benefit))
+
+write.csv(d2, "ev_benefit.csv", row.names = F)
+```
